@@ -33,7 +33,8 @@ artwork_size = [b - a for a, b in zip(*CORNERS)]
 # image viewer. There are options available to specify the ball or the special background,
 # use the "--help" flag to view all options.
 
-title_font = ImageFont.truetype(str(SOURCES_PATH / "ArsenicaTrial-Extrabold.ttf"), 170)
+title_font = ImageFont.truetype(str(SOURCES_PATH / "Nulshock Bd.otf"), 120)
+rarity_font = ImageFont.truetype(str(SOURCES_PATH / "OpenSans-Semibold.ttf"), 150)
 capacity_name_font = ImageFont.truetype(str(SOURCES_PATH / "Bobby Jones Soft.otf"), 110)
 capacity_description_font = ImageFont.truetype(str(SOURCES_PATH / "OpenSans-Semibold.ttf"), 75)
 stats_font = ImageFont.truetype(str(SOURCES_PATH / "Bobby Jones Soft.otf"), 130)
@@ -44,7 +45,7 @@ credits_color_cache = {}
 
 def get_credit_color(image: Image.Image, region: tuple) -> tuple:
     image = image.crop(region)
-    brightness = sum(image.convert("L").getdata()) / image.width / image.height  # type: ignore
+    brightness = sum(image.convert("L").getdata()) / image.width / image.height
     return (0, 0, 0, 255) if brightness > 100 else (255, 255, 255, 255)
 
 
@@ -57,6 +58,7 @@ def draw_card(
     ball_credits = ball.credits
     special_credits = ""
     card_name = ball.cached_regime.name
+    
     if special_image := ball_instance.special_card:
         card_name = getattr(ball_instance.specialcard, "name", card_name)
         image = Image.open(media_path + special_image)
@@ -64,23 +66,32 @@ def draw_card(
             special_credits += f" • Special Author: {ball_instance.specialcard.credits}"
     else:
         image = Image.open(media_path + ball.cached_regime.background)
+        
     image = image.convert("RGBA")
-    icon = (
-        Image.open(media_path + ball.cached_economy.icon).convert("RGBA")
-        if ball.cached_economy
-        else None
-    )
-
     draw = ImageDraw.Draw(image)
+    
     draw.text(
         (50, 20),
         ball.short_name or ball.country,
         font=title_font,
-        stroke_width=2,
+        stroke_width=4,
         stroke_fill=(0, 0, 0, 255),
+        fill=(255, 255, 255, 255),
+    )
+    
+
+    rarity_text = str(ball.rarity)
+    draw.text(
+        (1350, 20), 
+        rarity_text,
+        font=title_font,
+        stroke_width=4,
+        stroke_fill=(0, 0, 0, 255),
+        fill=(252, 194, 76, 255),
+        anchor="rt" 
     )
 
-    cap_name = textwrap.wrap(f"Ability: {ball.capacity_name}", width=26)
+    cap_name = textwrap.wrap(f"AKA: {ball.capacity_name}", width=26)
 
     for i, line in enumerate(cap_name):
         draw.text(
@@ -88,7 +99,7 @@ def draw_card(
             line,
             font=capacity_name_font,
             fill=(230, 230, 230, 255),
-            stroke_width=2,
+            stroke_width=3,
             stroke_fill=(0, 0, 0, 255),
         )
 
@@ -103,35 +114,30 @@ def draw_card(
             (60, 1100 + 100 * len(cap_name) + 80 * i),
             line,
             font=capacity_description_font,
-            stroke_width=1,
+            fill=(255, 255, 255, 255),
+            stroke_width=2,
             stroke_fill=(0, 0, 0, 255),
         )
 
     draw.text(
-        (320, 1670),
+        (900, 1865),
         str(ball_instance.health),
         font=stats_font,
         fill=ball_health,
-        stroke_width=1,
+        stroke_width=3,
         stroke_fill=(0, 0, 0, 255),
     )
+    
     draw.text(
-        (1120, 1670),
+        (1300, 1865),
         str(ball_instance.attack),
         font=stats_font,
         fill=(252, 194, 76, 255),
-        stroke_width=1,
+        stroke_width=3,
         stroke_fill=(0, 0, 0, 255),
         anchor="ra",
     )
-    if settings.show_rarity:
-        draw.text(
-            (1200, 50),
-            str(ball.rarity),
-            font=stats_font,
-            stroke_width=2,
-            stroke_fill=(0, 0, 0, 255),
-        )
+    
     if card_name in credits_color_cache:
         credits_color = credits_color_cache[card_name]
     else:
@@ -139,24 +145,23 @@ def draw_card(
             image, (0, int(image.height * 0.8), image.width, image.height)
         )
         credits_color_cache[card_name] = credits_color
+    
+    stroke_color = (0, 0, 0, 255) 
+    if credits_color == (0, 0, 0, 255): 
+        stroke_color = (255, 255, 255, 255)
+
     draw.text(
         (30, 1870),
-        # Modifying the line below is breaking the licence as you are removing credits
-        # If you don't want to receive a DMCA, just don't
-        f"Created by El Laggron{special_credits}\n" f"Artwork author: {ball_credits}",
+        f"Created by El Laggron\n" f"OWNER: I'm TS",
         font=credits_font,
         fill=credits_color,
-        stroke_width=0,
-        stroke_fill=(255, 255, 255, 255),
+        stroke_width=2,
+        stroke_fill=stroke_color,
     )
 
     artwork = Image.open(media_path + ball.collection_card).convert("RGBA")
-    image.paste(ImageOps.fit(artwork, artwork_size), CORNERS[0])  # type: ignore
-
-    if icon:
-        icon = ImageOps.fit(icon, (192, 192))
-        image.paste(icon, (1200, 30), mask=icon)
-        icon.close()
+    image.paste(ImageOps.fit(artwork, artwork_size), CORNERS[0])
+    
     artwork.close()
 
     return image, {"format": "WEBP"}

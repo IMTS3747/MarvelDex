@@ -32,6 +32,8 @@ SECRET_KEY = None
 ALLOWED_HOSTS = [
     "localhost",
     "127.0.0.1",
+    '.ngrok-free.dev',  # Allows any dynamic ngrok URL (for the free plan)
+    '.ngrok.io',  
 ]
 INTERNAL_IPS = [
     "127.0.0.1",
@@ -53,7 +55,7 @@ INSTALLED_APPS = [
     "admin_panel.apps.BallsdexAdminConfig",
     "bd_models",
     "preview",
-] + settings.django_apps
+]
 
 MIDDLEWARE = [
     "allow_cidr.middleware.AllowCIDRMiddleware",

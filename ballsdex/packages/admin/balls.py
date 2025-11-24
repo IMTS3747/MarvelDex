@@ -2,6 +2,7 @@ import asyncio
 import logging
 import random
 import re
+import enum
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -13,6 +14,7 @@ from tortoise.exceptions import BaseORMException, DoesNotExist
 from ballsdex.core.bot import BallsDexBot
 from ballsdex.core.models import Ball, BallInstance, Player, Special, Trade, TradeObject
 from ballsdex.core.utils.buttons import ConfirmChoiceView
+from ballsdex.core.models import Ball as Hero, GuildConfig, Ball, Player
 from ballsdex.core.utils.logging import log_action
 from ballsdex.core.utils.transformers import (
     BallTransform,
@@ -30,6 +32,11 @@ log = logging.getLogger("ballsdex.packages.admin.balls")
 FILENAME_RE = re.compile(r"^(.+)(\.\S+)$")
 
 
+class ModeChoice(enum.StrEnum):
+    obtainable = "obtainable"
+    unobtainable = "unobtainable"
+    all = "all"
+    
 async def save_file(attachment: discord.Attachment) -> Path:
     path = Path(f"./admin_panel/media/{attachment.filename}")
     match = FILENAME_RE.match(attachment.filename)
@@ -687,3 +694,57 @@ class Balls(app_commands.Group):
                 files=files,
             )
             log.info(f'{interaction.user} has created the {settings.collectible_name} "{name}"')
+            
+    @app_commands.command()
+    async def give_all(
+        self,
+        interaction: discord.Interaction["BallsDexBot"],
+        user: discord.User,
+        mode: ModeChoice = ModeChoice.obtainable,
+    ):
+        """
+        Gives all obtainable/unobtainable/all heroes to the specified user.
+
+        Parameters
+        ----------
+        user: discord.User
+            The user to give the heroes to.
+        mode: ModeChoice
+            Whether to give obtainable, unobtainable, or all heroes.
+        """
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        player, _ = await Player.get_or_create(discord_id=user.id)
+        hero_queryset = Hero.all()
+
+        if mode == ModeChoice.obtainable:
+            hero_queryset = hero_queryset.filter(enabled=True)
+        elif mode == ModeChoice.unobtainable:
+            hero_queryset = hero_queryset.filter(enabled=False)
+
+        heroes = await hero_queryset
+
+        if not heroes:
+            await interaction.followup.send(f"No heroes found to give for mode: {mode.name}.", ephemeral=True)
+            return
+
+        # Prepare list of BallInstances to create
+        new_instances = []
+        for hero in heroes:
+            # Check if user already has this hero (to prevent duplicates if required, adjust logic if duplicates are allowed)
+            if await BallInstance.filter(player=player, ball=hero).exists():
+                 continue
+
+            new_instances.append(BallInstance(player=player, ball=hero, catch_fee=0))
+
+        if not new_instances:
+             await interaction.followup.send(f"User {user.mention} already possesses all heroes in the selected mode.", ephemeral=True)
+             return
+
+        # Bulk create all new BallInstances
+        await BallInstance.bulk_create(new_instances)
+
+        await interaction.followup.send(
+            f"Successfully given {len(new_instances)} heroes (mode: {mode.name}) to {user.mention}.",
+            ephemeral=True,
+        )

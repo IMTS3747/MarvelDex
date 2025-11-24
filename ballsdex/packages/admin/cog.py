@@ -1,12 +1,13 @@
 from collections import defaultdict
 from typing import TYPE_CHECKING, cast
+import enum
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 from discord.ui import Button
 
-from ballsdex.core.models import Ball, GuildConfig
+from ballsdex.core.models import Ball as Hero, GuildConfig, Ball, Player
 from ballsdex.core.utils.paginator import FieldPageSource, Pages, TextPageSource
 from ballsdex.settings import settings
 
@@ -16,13 +17,18 @@ from .blacklist import BlacklistGuild as BlacklistGuildGroup
 from .history import History as HistoryGroup
 from .info import Info as InfoGroup
 from .logs import Logs as LogsGroup
+from ballsdex.core.models import BallInstance
 
 if TYPE_CHECKING:
     from ballsdex.core.bot import BallsDexBot
     from ballsdex.packages.countryballs.cog import CountryBallsSpawner
     from ballsdex.packages.trade.cog import Trade
+    from ballsdex.core.models import BallInstance
 
-
+class ModeChoice(enum.StrEnum):
+    obtainable = "obtainable"
+    unobtainable = "unobtainable"
+    all = "all"
 @app_commands.guilds(*settings.admin_guild_ids)
 @app_commands.default_permissions(administrator=True)
 class Admin(commands.GroupCog):

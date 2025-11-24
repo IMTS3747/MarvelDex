@@ -1,6 +1,11 @@
+import random
+import datetime
 import enum
+from datetime import timedelta, timezone
+
 import logging
 from typing import TYPE_CHECKING, cast
+from ballsdex.core.models import Ball, GuildConfig, Player, balls, Ball as Hero, balls as Heores
 
 import discord
 from discord import app_commands
@@ -20,7 +25,8 @@ from ballsdex.core.models import (
     balls,
 )
 from ballsdex.core.utils.buttons import ConfirmChoiceView
-from ballsdex.core.utils.paginator import FieldPageSource, Pages
+from ballsdex.core.cooldowns import get_cooldown, set_cooldown 
+from ballsdex.core.utils.paginator import FieldPageSource, Pages, TextPageSource
 from ballsdex.core.utils.sorting import FilteringChoices, SortingChoices, filter_balls, sort_balls
 from ballsdex.core.utils.transformers import (
     BallEnabledTransform,
@@ -36,8 +42,14 @@ if TYPE_CHECKING:
     from ballsdex.core.bot import BallsDexBot
 
 log = logging.getLogger("ballsdex.packages.countryballs")
+DAILY_COOLDOWN = 24 * 60 * 60  # 24 hours in seconds
+WEEKLY_COOLDOWN = 7 * 24 * 60 * 60  # 7 days in seconds
+SPECIAL_CHANCE = 0.005
 
-
+class ModeChoice(enum.StrEnum):
+    obtainable = "obtainable"
+    unobtainable = "unobtainable"
+    all = "all"
 class DonationRequest(View):
     def __init__(
         self,
@@ -962,3 +974,250 @@ class Balls(commands.GroupCog, group_name=settings.players_group_cog_name):
             if emoji:
                 embed.set_thumbnail(url=emoji.url)
         await interaction.followup.send(embed=embed)
+        
+    @app_commands.command(name="all")
+    async def md_all(
+        self,
+        interaction: discord.Interaction["BallsDexBot"],
+        mode: ModeChoice = ModeChoice.obtainable,
+    ):
+        """
+        List all heroes in the bot, sorted by rarity (rarest first).
+
+        Parameters
+        ----------
+        mode: ModeChoice
+            Whether to list obtainable, unobtainable, or all heroes.
+        """
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        # Order by -rarity (descending) for rarest first
+        hero_queryset = Hero.all().order_by("-rarity") 
+
+        if mode == ModeChoice.obtainable:
+            hero_queryset = hero_queryset.filter(enabled=True)
+        elif mode == ModeChoice.unobtainable:
+            hero_queryset = hero_queryset.filter(enabled=False)
+
+        # Fetch country (the name field) and rarity
+        heroes = await hero_queryset.values_list("country", "rarity")
+
+        if not heroes:
+            await interaction.followup.send("No heroes found matching that criteria.", ephemeral=True)
+            return
+
+        # Prepare list for FieldPageSource: (name, value) tuples.
+        # We will use the hero name as the field name and its rarity as the value.
+        field_list = [
+            (name, f"Rarity: {rarity}") 
+            for name, rarity in heroes
+        ]
+        
+        # Use FieldPageSource for proper embed pagination (25 items per page)
+        source = FieldPageSource(
+            field_list,
+            per_page=25,
+        )
+        
+        # Set the title and color directly on the source, which FieldPageSource supports.
+        source.embed.title = f"Heroes - {mode.name.title()}"
+        source.embed.color = discord.Color.blue()
+        
+        pages = Pages(source=source, interaction=interaction, compact=True)
+        await pages.start(ephemeral=True)
+        
+    async def _sample_hero(self, obtainable_only: bool = True, rare_only: bool = False):
+        """
+        Best-effort sampling:
+        - Prefer Ball.spawn_weight if present.
+        - Fallback to inverse of ball.rarity (1/rarity) if rarity > 0.
+        - Final fallback: uniform weights.
+        """
+        qs = Hero.all()
+        if obtainable_only:
+            qs = qs.filter(enabled=True)
+        if rare_only:
+            # user said "rare means subs 1.0" -> filter rarity == 1.0 (adjust if your schema differs)
+            qs = qs.filter(rarity=1.0)
+
+        heroes = await qs  # returns list of model instances
+
+        if not heroes:
+            return None
+
+        weights = []
+        for h in heroes:
+            # If your Ball model actually has 'spawn_weight' or similar, it will be preferred:
+            w = getattr(h, "spawn_weight", None)
+            if w is None:
+                # fallback to inverse of rarity if available
+                rarity = getattr(h, "rarity", None)
+                if rarity is None:
+                    w = 1.0
+                else:
+                    # avoid division by zero; a higher rarity value -> rarer item,
+                    # so inverse gives more weight to common items.
+                    w = 1.0 / (rarity if rarity > 0 else 1.0)
+            weights.append(w)
+
+        # Normalize or pass directly to random.choices
+        try:
+            chosen = random.choices(heroes, weights=weights, k=1)[0]
+        except Exception:
+            # final fallback: uniform random
+            chosen = random.choice(heroes)
+        return chosen
+
+
+    @app_commands.command(name="daily")
+    @app_commands.checks.cooldown(1, DAILY_COOLDOWN, key=lambda i: i.user.id)
+    async def md_daily(self, interaction: discord.Interaction["BallsDexBot"]):
+        """
+        /md daily - give the user a single random hero. 24h cooldown.
+        Odds use the same weighting logic as natural spawns (best-effort).
+        Small chance to be a special instead.
+        """
+        await interaction.response.defer(thinking=True)
+
+        # get or create player
+        player, _ = await Player.filter(discord_id=interaction.user.id).only("discord_id", "id").get_or_create()
+
+        # Decide if reward will be a special instead
+        give_special = random.random() < SPECIAL_CHANCE
+
+        # Sample a hero (obtainable only)
+        hero = await self._sample_hero(obtainable_only=True, rare_only=False)
+        if not hero:
+            await interaction.followup.send(
+                "No heroes are registered on this bot right now.", ephemeral=True
+            )
+            return
+
+        # Check ownership before creating the instance:
+        owned_any = await BallInstance.filter(player=player, ball=hero).exists()
+
+        # Create stats (attack and health bonuses are percent-style ints)
+        attack_bonus = random.randint(-20, 20)
+        health_bonus = random.randint(-20, 20)
+
+        # Create the BallInstance. Adapt fields to your actual schema if different.
+        try:
+            instance = await BallInstance.create(
+                ball=hero,
+                player=player,
+                attack_bonus=attack_bonus,
+                health_bonus=health_bonus,
+                favorite=False,
+            )
+        except Exception:
+            log.exception("Failed to create BallInstance for /md daily")
+            await interaction.followup.send(
+                "Something went wrong creating your packed hero. Contact an admin.",
+                ephemeral=True,
+            )
+            return
+
+        # Optionally attach a special (best-effort)
+        special_text = ""
+        if give_special:
+            try:
+                specials = await Special.filter(hidden=False).all()
+                if specials:
+                    chosen_special = random.choice(specials)
+                    instance.special = chosen_special
+                    await instance.save()
+                    special_text = f" (Special: {chosen_special.name})"
+            except Exception:
+                log.exception("Failed to attach special for /md daily")
+
+        # Message formatting:
+        sign = "+" if attack_bonus >= 0 else ""
+        sign2 = "+" if health_bonus >= 0 else ""
+        instance_id_hex = f"{instance.pk:X}" if getattr(instance, "pk", None) is not None else str(
+            instance.id if getattr(instance, "id", None) is not None else "0"
+        )
+        first_line = (
+            f"{interaction.user.mention} You packed **{hero.country}**! "
+            f"(#{instance_id_hex}, {sign2}{health_bonus}%/{sign}{attack_bonus}%)"
+            f"{special_text}"
+        )
+
+        completion_msg = ""
+        if not owned_any:
+            completion_msg = "\n\nThis is a new footdex that has been added to your completion!"
+
+        await interaction.followup.send(first_line + completion_msg)
+
+
+    @app_commands.command(name="weekly")
+    @app_commands.checks.cooldown(1, WEEKLY_COOLDOWN, key=lambda i: i.user.id)
+    async def md_weekly(self, interaction: discord.Interaction["BallsDexBot"]):
+        """
+        /md weekly - give the user a random *rare* hero (rarity == 1.0 per your note).
+        7 day cooldown.
+        """
+        await interaction.response.defer(thinking=True)
+
+        player, _ = await Player.get_or_create(discord_id=interaction.user.id)
+
+        give_special = random.random() < SPECIAL_CHANCE
+
+        hero = await self._sample_hero(obtainable_only=True, rare_only=True)
+        if not hero:
+            hero = await self._sample_hero(obtainable_only=True, rare_only=False)
+            if not hero:
+                await interaction.followup.send(
+                    "No heroes are registered on this bot right now.", ephemeral=True
+                )
+                return
+
+        owned_any = await BallInstance.filter(player=player, ball=hero).exists()
+
+        attack_bonus = random.randint(-20, 20)
+        health_bonus = random.randint(-20, 20)
+
+        try:
+            instance = await BallInstance.create(
+                ball=hero,
+                player=player,
+                attack_bonus=attack_bonus,
+                health_bonus=health_bonus,
+                favorite=False,
+            )
+        except Exception:
+            log.exception("Failed to create BallInstance for /md weekly")
+            await interaction.followup.send(
+                "Something went wrong creating your packed hero. Contact an admin.",
+                ephemeral=True,
+            )
+            return
+
+        special_text = ""
+        if give_special:
+            try:
+                specials = await Special.filter(hidden=False).all()
+                if specials:
+                    chosen_special = random.choice(specials)
+                    instance.special = chosen_special
+                    await instance.save()
+                    special_text = f" (Special: {chosen_special.name})"
+            except Exception:
+                log.exception("Failed to attach special for /md weekly")
+
+        sign = "+" if attack_bonus >= 0 else ""
+        sign2 = "+" if health_bonus >= 0 else ""
+        instance_id_hex = f"{instance.pk:X}" if getattr(instance, "pk", None) is not None else str(
+            instance.id if getattr(instance, "id", None) is not None else "0"
+        )
+
+        first_line = (
+            f"{interaction.user.mention} You packed **{hero.country}**! "
+            f"(#{instance_id_hex}, {sign2}{health_bonus}%/{sign}{attack_bonus}%)"
+            f"{special_text}"
+        )
+
+        completion_msg = ""
+        if not owned_any:
+            completion_msg = "\n\nThis is a new footdex that has been added to your completion!"
+
+        await interaction.followup.send(first_line + completion_msg)
